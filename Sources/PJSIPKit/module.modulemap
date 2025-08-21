@@ -1,0 +1,5 @@
+module PJSIPKit [system] {
+    header "pjlib.h"
+    link "pjproject"
+    export *
+}
