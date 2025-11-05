@@ -18,6 +18,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("AVFoundation"),
+                .linkedFramework("VideoToolbox"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("QuartzCore"),
                 .linkedFramework("Network"),
             ]
         ),
