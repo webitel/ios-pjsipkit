@@ -22,6 +22,7 @@ let package = Package(
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("MetalKit"),
                 .linkedFramework("Network"),
             ]
         ),
