@@ -68,6 +68,11 @@ struct pjsua_call_media
             pjmedia_vid_dev_index rdr_dev;  /**< The video-in render device */
         } v;
 
+        /** Text stream */
+        struct {
+            pjmedia_txt_stream  *stream;    /**< The text stream.           */
+        } t;
+
     } strm;
 
     pj_uint32_t          ssrc;      /**< RTP SSRC                           */
@@ -90,6 +95,13 @@ struct pjsua_call_media
     pjmedia_transport   *tp;        /**< Current media transport (can be 0) */
     pj_status_t          tp_ready;  /**< Media transport status.            */
     pj_status_t          tp_result; /**< Media transport creation result.   */
+    unsigned             tp_init_gen;/**< Media transport init generation,
+                                          bumped on each (re)init and when a
+                                          synchronous init wait is abandoned. */
+    unsigned             tp_result_gen;/**< Generation that tp_result belongs
+                                            to; a deferred completion whose
+                                            generation no longer matches
+                                            tp_init_gen is stale and ignored. */
     pjmedia_transport   *tp_orig;   /**< Original media transport           */
     pj_bool_t            tp_auto_del; /**< May delete media transport       */
     pjsua_med_tp_st      tp_st;     /**< Media transport state              */
@@ -117,6 +129,35 @@ struct pjsua_call_media
  * Maximum number of SDP "m=" lines to be supported.
  */
 #define PJSUA_MAX_CALL_MEDIA            PJMEDIA_MAX_SDP_MEDIA
+
+/* Pack/extract call id (lower 16 bits) and media index (upper 16 bits)
+ * in media stream callback user data. Valid input is [0, 0x7FFF] and
+ * asserted in debug builds. The fields are stored as signed 16-bit
+ * values so that an invalid -1 escaping the assertion in release
+ * builds still decodes as -1 rather than 65535.
+ */
+PJ_INLINE(void*) pjsua_med_udata_pack(pjsua_call_id call_id, int med_idx)
+{
+    pj_assert(call_id >= 0 && call_id <= 0x7FFF &&
+              med_idx >= 0 && med_idx <= 0x7FFF);
+    return (void*)(((pj_size_t)(pj_uint16_t)med_idx << 16) |
+                   (pj_size_t)(pj_uint16_t)call_id);
+}
+
+PJ_INLINE(pjsua_call_id) pjsua_med_udata_call_id(const void *udata)
+{
+    return (pjsua_call_id)(pj_int16_t)((pj_size_t)udata & 0xFFFF);
+}
+
+PJ_INLINE(int) pjsua_med_udata_med_idx(const void *udata)
+{
+    return (int)(pj_int16_t)(((pj_size_t)udata >> 16) & 0xFFFF);
+}
+
+ /**
+  * Maximum number of streams from an avi player.
+  */
+#define PJSUA_MAX_AVI_NUM_STREAMS       PJMEDIA_AVI_MAX_NUM_STREAMS
 
 /* Call answer's list. */
 typedef struct call_answer
@@ -213,6 +254,8 @@ struct pjsua_call
                                             offer.                          */
     unsigned             rem_vid_cnt;  /**< No of active video in last remote
                                             offer.                          */
+    unsigned             rem_txt_cnt;  /**< No of active text in last remote
+                                            offer.                          */
     
     pj_bool_t            rx_reinv_async;/**< on_call_rx_reinvite() async.   */
     pj_timer_entry       reinv_timer;  /**< Reinvite retry timer.           */
@@ -241,6 +284,9 @@ struct pjsua_call
     unsigned             hangup_code;   /**< Hangup code.                   */
     pj_str_t             hangup_reason; /**< Hangup reason.                 */
     pjsua_msg_data      *hangup_msg_data;/**< Hangup message data.          */
+    pj_str_t             siprec_metadata;/** siprec metadata in body        */
+
+    pjmedia_av_sync     *av_sync;       /**< Media stream synchronizer      */
 };
 
 
@@ -305,6 +351,48 @@ typedef struct pjsua_acc
     pj_sockaddr      ka_target;     /**< Destination address for K-A    */
     unsigned         ka_target_len; /**< Length of ka_target.           */
 
+    /* Account-scoped server affinity (issue #4964). Pins the resolved
+     * next-hop on REGISTER (or via pjsua_acc_set_affinity_addr) so that
+     * subsequent same-account requests bypass the SRV/DNS server-election
+     * randomness in pjlib-util/srv_resolver.c.
+     */
+    pj_bool_t        sa_enabled;    /**< Effective enabled flag.         */
+    pj_bool_t        sa_pin_explicit;  /**< Pin was set by API call (not
+                                            auto-captured). Survives
+                                            auto-rereg pin drop.        */
+    pj_sockaddr      sa_next_hop_addr; /**< Cached resolved address.     */
+    pjsip_transport *sa_next_hop_tp;   /**< Cached transport (ref'd).
+                                            NULL when pin is empty; set
+                                            on regc_cb auto-capture or
+                                            pjsua_acc_set_affinity_addr
+                                            success.                    */
+    pjsip_route_hdr *sa_route_hdr;     /**< Hidden Route injected at the
+                                            head of route_set when pin
+                                            is active. Constrains UDP
+                                            destination via loose-route.
+                                            Suppressed from wire by the
+                                            ;hide URI param. NULL when
+                                            pin is empty.               */
+    pj_sockaddr      sa_route_hdr_addr;/**< The address sa_route_hdr was
+                                            built for. Used to skip
+                                            pjsip_parse_hdr() rebuild
+                                            when the cached header is
+                                            still valid (e.g., on the
+                                            acc_modify detach/reattach
+                                            path).                      */
+    pjsip_route_hdr  sa_pushed_route;  /**< Mirror of what we last
+                                            pushed to regc. Diffed
+                                            against acc->route_set
+                                            before each push so we
+                                            skip the regc clone when
+                                            nothing actually changed.   */
+    pj_pool_t       *sa_mirror_pool;   /**< Sub-pool for sa_pushed_route
+                                            clones. Reset on each
+                                            mirror rebuild so memory
+                                            does not grow with each
+                                            sync (acc->pool has no
+                                            reset point).               */
+
     pjsip_route_hdr  route_set;     /**< Complete route set inc. outbnd.*/
     pj_uint32_t      global_route_crc; /** CRC of global route setting. */
     pj_uint32_t      local_route_crc;  /** CRC of account route setting.*/
@@ -333,6 +421,8 @@ typedef struct pjsua_acc
     pjsip_transport_type_e tp_type; /**< Transport type (for local acc or
                                          transport binding)             */
     pjsua_ip_change_op ip_change_op;/**< IP change process progress.    */
+    pjsip_auth_clt_sess shared_auth_sess; /**< Share one auth session over
+                                               all requests             */
 } pjsua_acc;
 
 
@@ -368,6 +458,7 @@ typedef struct pjsua_buddy
 {
     pj_pool_t           *pool;      /**< Pool for this buddy.           */
     unsigned             index;     /**< Buddy index.                   */
+    pjsua_acc_id         acc_id;    /**< Account index.                 */
     void                *user_data; /**< Application data.              */
     pj_str_t             uri;       /**< Buddy URI.                     */
     pj_str_t             contact;   /**< Contact learned from subscrp.  */
@@ -398,6 +489,37 @@ typedef struct pjsua_file_data
     unsigned         slot;
 } pjsua_file_data;
 
+/**
+ * AVI player data.
+ */
+typedef struct pjsua_avi_player_data
+{
+    pj_pool_t                 *pool;
+    pjmedia_avi_streams       *avi_streams;
+    unsigned                   vid_cnt;
+    unsigned                   aud_cnt;
+    pjmedia_vid_dev_index      vid_dev_id;
+    pjsua_conf_port_id         slot[PJSUA_MAX_AVI_NUM_STREAMS];
+    pjmedia_port              *port[PJSUA_MAX_AVI_NUM_STREAMS];
+    pjmedia_type               type[PJSUA_MAX_AVI_NUM_STREAMS];
+
+} pjsua_avi_player_data;
+
+/**
+ * AVI recorder data.
+ */
+typedef struct pjsua_avi_recorder_data
+{
+    pj_pool_t               *pool;
+    pjmedia_avi_streams     *avi_streams;
+    pjsua_conf_port_id       aud_slot;
+    pjsua_conf_port_id       vid_slot;
+    pjmedia_port            *aud_port;
+    pjmedia_port            *vid_port;
+    void                    (*cb)(pjsua_avi_rec_id id,
+                                  void *user_data);
+    void                    *user_data;
+} pjsua_avi_recorder_data;
 
 /**
  * Additional parameters for conference bridge.
@@ -446,6 +568,9 @@ typedef struct pjsua_vid_win
     pjsua_vid_win_type           type;          /**< Type.              */
     pj_pool_t                   *pool;          /**< Own pool.          */
     unsigned                     ref_cnt;       /**< Reference counter. */
+    pj_bool_t                    is_destroying; /**< Currently being torn
+                                                     down (free_vid_win()
+                                                     in progress).      */
     pjmedia_vid_port            *vp_cap;        /**< Capture vidport.   */
     pjmedia_vid_port            *vp_rend;       /**< Renderer vidport   */
     pjsua_conf_port_id           cap_slot;      /**< Capturer conf slot */
@@ -532,7 +657,7 @@ struct pjsua_data
     /* Calls: */
     pjsua_config         ua_cfg;                /**< UA config.         */
     unsigned             call_cnt;              /**< Call counter.      */
-    pjsua_call           calls[PJSUA_MAX_CALLS];/**< Calls array.       */
+    pjsua_call          *calls;                 /**< Calls array.       */
     pjsua_call_id        next_call_id;          /**< Next call id to use*/
 
     /* Buddy; */
@@ -563,6 +688,8 @@ struct pjsua_data
     pjmedia_master_port *null_snd;  /**< Master port for null sound.    */
     pjmedia_port        *null_port; /**< Null port.                     */
     pj_bool_t            snd_is_on; /**< Media flow is currently active */
+    pj_bool_t            snd_avoid_clock_gap; /**< Keep clock continuity
+                                                    across null<->real dev */
     unsigned             snd_mode;  /**< Sound device mode.             */
 
     /* Video device */
@@ -583,6 +710,19 @@ struct pjsua_data
     /* File recorders: */
     unsigned             rec_cnt;   /**< Number of file recorders.      */
     pjsua_file_data      recorder[PJSUA_MAX_RECORDERS];/**< Array of recs.*/
+
+#if PJSUA_HAS_VIDEO
+    /* AVI file players: */
+    pjmedia_vid_dev_factory *avi_factory;      /**< AVI player factory.       */
+    unsigned                 avi_player_cnt;    /**< Number of avi players.   */
+    pjsua_avi_player_data    avi_player[PJSUA_MAX_AVI_PLAYERS];/**< Array of
+                                                                 avi players. */
+
+    /* AVI file recorders: */
+    unsigned                  avi_rec_cnt;   /**< Number of avi recorders.    */
+    pjsua_avi_recorder_data   avi_recorder[PJSUA_MAX_AVI_RECORDERS];/**< Array 
+                                                             of avi recorders.*/
+#endif
 
     /* Video windows */
 #if PJSUA_HAS_VIDEO
@@ -735,6 +875,35 @@ pj_status_t pjsua_acc_get_uac_addr(pjsua_acc_id acc_id,
                                    pjsip_transport_type_e *p_tp_type,
                                    int *p_secure,
                                    const void **p_tp);
+
+/* Get local transport address suitable to be used for the Via address of
+ * requests sent by a UAS dialog. Unlike pjsua_acc_get_uac_addr(), the next
+ * hop is taken from the dialog route set (from the incoming Record-Route),
+ * falling back to the remote target. Returns PJ_ENOTFOUND when the next hop
+ * is a reliable transport (the Via is then resolved at send time), so the
+ * caller should leave the Via untouched.
+ */
+pj_status_t pjsua_acc_get_uas_addr(pjsua_acc_id acc_id,
+                                   pj_pool_t *pool,
+                                   pjsip_dialog *dlg,
+                                   pjsip_host_port *addr,
+                                   pjsip_transport_type_e *p_tp_type,
+                                   int *p_secure,
+                                   const void **p_tp);
+
+/* Get local transport address for the Via of requests sent by a UAC dialog.
+ * Like pjsua_acc_get_uac_addr(), the next hop is the account outbound proxy
+ * when configured, but otherwise the dialog's remote target (not the account
+ * id URI). Returns PJ_ENOTFOUND when the next hop is a reliable transport (the
+ * Via is resolved at send time), so the caller should leave the Via untouched.
+ */
+pj_status_t pjsua_acc_get_uac_dlg_addr(pjsua_acc_id acc_id,
+                                       pj_pool_t *pool,
+                                       pjsip_dialog *dlg,
+                                       pjsip_host_port *addr,
+                                       pjsip_transport_type_e *p_tp_type,
+                                       int *p_secure,
+                                       const void **p_tp);
 
 /**
  * Handle incoming invite request.
@@ -932,6 +1101,18 @@ void print_call(const char *title,
                 int call_id,
                 char *buf, pj_size_t size);
 
+char *pjsua_get_basename(const char *path, unsigned len);
+
+/*
+ * Internal function to reset avi player data
+ */
+void pjsua_reset_avi_player_data(pjsua_avi_player_id id);
+
+/*
+ * Internal function to reset avi recorder data
+ */
+void pjsua_reset_avi_recorder_data(pjsua_avi_rec_id id);
+
 /*
  * Audio
  */
@@ -967,6 +1148,16 @@ void pjsua_vid_win_reset(pjsua_vid_win_id wid);
 #endif
 
 /*
+ * Text
+ */
+void pjsua_txt_stop_stream(pjsua_call_media *call_med);
+pj_status_t pjsua_txt_channel_update(pjsua_call_media *call_med,
+                                     pj_pool_t *tmp_pool,
+                                     pjmedia_txt_stream_info *si,
+                                     const pjmedia_sdp_session *local_sdp,
+                                     const pjmedia_sdp_session *remote_sdp);
+
+/*
  * Schedule check for the need of re-INVITE/UPDATE after media update
  */
 void pjsua_call_schedule_reinvite_check(pjsua_call *call, unsigned delay_ms);
@@ -985,6 +1176,14 @@ pj_status_t pjsua_acc_handle_call_on_ip_change(pjsua_acc *acc);
  * End IP change process per account.
  */
 void pjsua_acc_end_ip_change(pjsua_acc *acc);
+
+/*
+ * Bridge callback: maps low-level auth challenge to pjsua on_auth_challenge.
+ */
+pj_bool_t pjsua_auth_on_challenge(
+                             pjsip_auth_clt_sess *sess,
+                             void *token,
+                             const pjsip_auth_clt_async_on_chal_param *param);
 
 PJ_END_DECL
 

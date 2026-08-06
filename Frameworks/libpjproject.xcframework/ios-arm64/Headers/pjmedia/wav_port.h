@@ -46,7 +46,15 @@ enum pjmedia_file_player_option
      * Tell the file player to return NULL frame when the whole
      * file has been played.
      */
-    PJMEDIA_FILE_NO_LOOP = 1
+    PJMEDIA_FILE_NO_LOOP = 1,
+
+    /**
+     * Disable mutex protection for getting/setting the player's position.
+     * If the application does not access the file position, enabling this
+     * option may improve performance by avoiding unnecessary locking on
+     * each frame retrieval.
+     */
+    PJMEDIA_FILE_NO_LOCK = 2
 };
 
 
@@ -83,6 +91,13 @@ typedef struct pjmedia_wav_player_info
  * Create a media port to play streams from a WAV file. WAV player port
  * supports for reading WAV file with uncompressed 16 bit PCM format or 
  * compressed G.711 A-law/U-law format.
+ * 
+ * Note: The ptime value must be compatible with the WAV file's sample rate.
+ * If the combination results in a fractional number of samples per frame,
+ * port creation will fail.
+ * For example, a sample rate of 22050 Hz and a frame duration (ptime) of 10 ms
+ * will result in 220.5 samples per frame, which is not an integer, 
+ * so port creation will fail.
  *
  * @param pool          Pool to create memory buffers for this port.
  * @param filename      File name to open.
@@ -129,6 +144,12 @@ PJ_DECL(pj_ssize_t) pjmedia_wav_player_get_len(pjmedia_port *port);
 /**
  * Set the file play position of WAV player.
  *
+ * @b Safety: if the player is created with PJMEDIA_FILE_NO_LOCK option,
+ * this function can only be called when the player is not running
+ * (that is: get_frame() is not being called).
+ *
+ * @sa PJMEDIA_FILE_NO_LOCK
+ *
  * @param port          The file player port.
  * @param offset        Playback position in bytes, relative to the start of
  *                      the payload.
@@ -141,6 +162,12 @@ PJ_DECL(pj_status_t) pjmedia_wav_player_port_set_pos( pjmedia_port *port,
 
 /**
  * Get the file play position of WAV player, in bytes.
+ *
+ * @b Safety: if the player is created with PJMEDIA_FILE_NO_LOCK option,
+ * this function can only be called when the player is not running
+ * (that is: get_frame() is not being called).
+ *
+ * @sa PJMEDIA_FILE_NO_LOCK
  *
  * @param port          The file player port.
  *
@@ -265,7 +292,6 @@ PJ_DECL(pj_status_t) pjmedia_wav_writer_port_create(pj_pool_t *pool,
                                                     pj_ssize_t buff_size,
                                                     pjmedia_port **p_port );
 
-
 /**
  * Get current writing position. Note that this does not necessarily match
  * the size written to the file, since the WAV writer employs some internal
@@ -323,7 +349,7 @@ pjmedia_wav_writer_port_set_cb( pjmedia_port *port,
  *
  * @return              PJ_SUCCESS on success.
  */
-PJ_DECL(pj_status_t) 
+PJ_DECL(pj_status_t)
 pjmedia_wav_writer_port_set_cb2(pjmedia_port *port,
                                 pj_size_t pos,
                                 void *user_data,
@@ -334,6 +360,7 @@ pjmedia_wav_writer_port_set_cb2(pjmedia_port *port,
 /**
  * @}
  */
+
 
 
 PJ_END_DECL

@@ -227,6 +227,16 @@
 #   define PJ_TURN_MAX_TCP_CONN_CNT                 8
 #endif
 
+/**
+ * Specify default value of TURN TLS socket connection timeout in contacting
+ * TURN server.
+ *
+ * Default: 10 seconds
+ */
+#ifndef PJ_TURN_SSL_SOCK_DEFAULT_TIMEOUT
+#   define PJ_TURN_SSL_SOCK_DEFAULT_TIMEOUT         10
+#endif
+
 /* **************************************************************************
  * ICE CONFIGURATION
  */
@@ -384,6 +394,38 @@
 
 
 /**
+ * Specify how long an agent wants to wait (in milliseconds) for a valid pair
+ * to be created from incoming connectivity checks, after it has found that all
+ * connectivity checks in its checklist have been completed but one or more
+ * components still lack a valid pair.
+ *
+ * This is useful when the agent's own connectivity checks cannot be sent
+ * (e.g. the local routing or firewall rejects the remote candidate address),
+ * while the remote agent may still be able to reach this agent and trigger a
+ * valid pair via incoming checks. It applies to both controlling and
+ * controlled agents.
+ *
+ * This timer starts after all of the agent's own checks have completed. Note
+ * that, for an answerer, this may happen before the remote agent has received
+ * the SDP answer and started sending its checks, especially when the agent's
+ * own checks fail immediately (e.g. due to local routing/firewall rejecting
+ * the remote candidate address). The timeout should therefore also
+ * accommodate the time until the remote receives the answer and its first
+ * incoming check arrives, similar to the consideration for
+ * ICE_CONTROLLED_AGENT_WAIT_NOMINATION_TIMEOUT.
+ *
+ * Application may set this value to -1 to disable this timer, in which case
+ * ICE will fail immediately when all checks have completed without any valid
+ * pair.
+ *
+ * Default: 10000 (milliseconds)
+ */
+#ifndef PJ_ICE_WAIT_VALID_PAIR_TIMEOUT
+#   define PJ_ICE_WAIT_VALID_PAIR_TIMEOUT               10000
+#endif
+
+
+/**
  * For controlling agent if it uses regular nomination, specify the delay to
  * perform nominated check (connectivity check with USE-CANDIDATE attribute)
  * after all components have a valid pair.
@@ -394,6 +436,28 @@
 #   define PJ_ICE_NOMINATED_CHECK_DELAY             (4*PJ_STUN_RTO_VALUE)
 #endif
 
+/**
+ * Specify whether to check the source address of the incoming messages.
+ * The source address will be compared to the remote candidate which has
+ * a completed connectivity check or received a connectivity check.
+ * 
+ * Default: 1 (yes)
+ */
+#ifndef PJ_ICE_SESS_CHECK_SRC_ADDR
+#   define PJ_ICE_SESS_CHECK_SRC_ADDR               1
+#endif
+
+ /**
+  * If ICE source address check is enabled, any incoming data is allowed
+  * from all possible remote candidates until ICE is completed. Use this 
+  * configuration to specify the time to wait before setting the remote
+  * address to a fix address.
+  *
+  * Defalut: 1000ms 
+  */
+#ifndef PJ_ICE_SESS_SET_RADDR_DELAY
+#   define PJ_ICE_SESS_SET_RADDR_DELAY             1000
+#endif
 
 /**
  * Minimum interval value to be used for sending STUN keep-alive on the ICE

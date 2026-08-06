@@ -23,6 +23,7 @@
  * @brief PJSUA2 Call manipulation
  */
 #include <pjsua-lib/pjsua.h>
+#include <pjsua2/account.hpp>
 #include <pjsua2/media.hpp>
 
 /** PJSUA2 API is inside pj namespace */
@@ -281,7 +282,8 @@ struct CallSetting
     /**
      * Bitmask of pjsua_call_flag constants.
      *
-     * Default: PJSUA_CALL_INCLUDE_DISABLED_MEDIA
+     * Default: 0
+     * (PJSUA_CALL_INCLUDE_DISABLED_MEDIA is the legacy default value).
      */
     unsigned        flag;
     
@@ -309,6 +311,14 @@ struct CallSetting
      * Default: 1 (if video feature is enabled, otherwise it is zero)
      */
     unsigned        videoCount;
+
+    /**
+     * Number of simultaneous active text streams for this call. Setting
+     * this to zero will disable text in this call.
+     *
+     * Default: 1
+     */
+    unsigned        textCount;
 
     /**
      * Media direction. This setting will only be used if the flag
@@ -553,6 +563,11 @@ struct CallInfo
      */
     unsigned            remVideoCount;
 
+    /**
+     * Number of text streams offered by remote
+     */
+    unsigned            remTextCount;
+
 public:
     /**
      * Default constructor
@@ -564,7 +579,8 @@ public:
                  lastStatusCode(PJSIP_SC_NULL),
                  remOfferer(false),
                  remAudioCount(0),
-                 remVideoCount(0)
+                 remVideoCount(0),
+                 remTextCount(0)
     {}
 
     /**
@@ -674,6 +690,21 @@ struct StreamInfo
      * enabled?
      */
     bool                useKa;
+
+    /**
+     *  Number of keepalive messages to be sent
+     */
+    unsigned            startCountKa;
+
+    /**
+     * Keepalive interval after the stream is created.
+     */
+    unsigned startIntervalKa;
+
+    /**
+     *  Keepalive sending interval.
+     */
+    unsigned intervalKa;
 #endif
 
     /**
@@ -756,6 +787,30 @@ struct OnCallTsxStateParam
 };
 
 /**
+ * This structure contains parameters for Call::onCallTsxTerminateSession()
+ * callback.
+ */
+struct OnCallTsxTerminateSessionParam
+{
+    /**
+     * Transaction event that would otherwise cause the call to be terminated.
+     * Inspect e.body.tsxState.tsx for the failed transaction's method and
+     * status code.
+     */
+    SipEvent    e;
+
+    /**
+     * Output: application sets this to true to suppress the automatic
+     * session termination and keep the call alive. Default is false, i.e.
+     * the library will terminate the call as per default behavior.
+     */
+    bool        suppressTermination;
+
+    OnCallTsxTerminateSessionParam() : suppressTermination(false)
+    {}
+};
+
+/**
  * This structure contains parameters for Call::onCallMediaState() callback.
  */
 struct OnCallMediaStateParam
@@ -825,6 +880,20 @@ struct OnStreamCreatedParam
      * On input, it specifies the audio media port of the stream. Application
      * may modify this pointer to point to different media port to be
      * registered to the conference bridge.
+     *
+     * \warning
+     * If the substituted port retains a pointer to the original audio
+     * stream port (e.g. a DSP wrapper around it), the application must
+     * take a reference on the inner port's group lock at construction
+     * (pj_grp_lock_add_ref() on the original port's grp_lock; note that
+     * MediaPort is a void* alias of pjmedia_port*, so a cast is needed)
+     * and release it from the wrapper's on_destroy(). Otherwise
+     * pjmedia_stream_destroy(), which PJSUA calls unconditionally at
+     * call teardown, may free the inner port while the conference bridge
+     * is still iterating over the wrapper. The substituted port also
+     * needs its own pool released from on_destroy(); set #destroyPort
+     * to true so PJSUA fires the destroy chain. See "Customizing the
+     * Audio Stream Port" in the docs guide for the full contract.
      */
     MediaPort   pPort;
 };
@@ -867,6 +936,12 @@ struct OnDtmfDigitParam
      * PJSUA_UNKNOWN_DTMF_DURATION.
      */
     unsigned            duration;
+
+    /**
+     * The media index of the audio stream that received the DTMF, or -1
+     * if the DTMF was not received via a media stream (e.g. SIP INFO).
+     */
+    int                 medIdx;
 };
 
 /**
@@ -917,6 +992,46 @@ struct OnDtmfEventParam
      * an event with PJMEDIA_STREAM_DTMF_IS_END for every event.
      */
     unsigned            flags;
+
+    /**
+     * The media index of the audio stream that received the DTMF, or -1
+     * if the DTMF was not received via a media stream (e.g. SIP INFO).
+     */
+    int                 medIdx;
+};
+
+/**
+ * This structure contains parameters for Call::onCallRxText()
+ * callback.
+ */
+struct OnCallRxTextParam
+{
+    /**
+     * The sequence of the incoming text block data.
+     */
+    int                 seq;
+
+    /**
+     * The timestamp of the text block data.
+     */
+    unsigned            ts;
+
+    /**
+     * The content of the text block.
+     * Note that the text can be empty.
+     */
+    string              text;
+
+    /**
+     * The index of the text media stream that received the text.
+     */
+    int                 medIdx;
+
+public:
+    /**
+     * Convert from pjsip
+     */
+    void fromPj(const pjsua_txt_stream_data &prm);
 };
 
 /**
@@ -1384,6 +1499,32 @@ public:
 };
 
 /**
+ * This structure contains parameters for Call::sendText()
+ */
+struct CallSendTextParam
+{
+    /**
+     * Specify the text media stream index. This can be set to -1 to denote
+     * the first text stream in the call.
+     *
+     * Default: -1 (first text stream)
+     */
+    int     medIdx;
+
+    /**
+     * The text data to be sent.
+     */
+    string  text;
+
+public:
+    /**
+     * Default constructor initializes with default value.
+     */
+    CallSendTextParam();
+};
+
+
+/**
  * Call.
  */
 class Call
@@ -1714,6 +1855,14 @@ public:
     void sendDtmf(const CallSendDtmfParam &param) PJSUA2_THROW(Error);
     
     /**
+     * Send real-time text to remote via RTP stream. This only works if
+     * the call has text media.
+     *
+     * @param param     The send text parameter.
+     */
+    void sendText(const CallSendTextParam &param) PJSUA2_THROW(Error);
+
+    /**
      * Send instant messaging inside INVITE session.
      *
      * @param prm.contentType
@@ -1895,6 +2044,40 @@ public:
      */
     virtual void onCallTsxState(OnCallTsxStateParam &prm)
     { PJ_UNUSED_ARG(prm); }
+
+    /**
+     * Notification when an in-dialog UAC transaction within the call is
+     * about to cause the call to be terminated due to RFC 3261 #12.2.1.2
+     * failures: 408 Request Timeout, transaction timeout, or 481
+     * Call/Transaction Does Not Exist response.
+     *
+     * Application can inspect prm.e (e.g. e.body.tsxState.tsx.method and
+     * tsx.statusCode) to determine the failed request, and set
+     * prm.suppressTermination to true to keep the call alive instead of
+     * letting the library terminate it. This is useful for application
+     * level requests such as INFO/MESSAGE where the failure should not
+     * teardown the call (see RFC 5057 #5.2 and e.g. ETSI EN 16072 eCall).
+     *
+     * When suppressed, the library still cancels any pending SDP offer
+     * that the failed re-INVITE or UPDATE carried, so the call remains
+     * usable for subsequent renegotiation.
+     *
+     * Interaction with pjsip_cfg()->endpt.keep_inv_after_tsx_timeout:
+     * when that global flag is set, the 408/timeout branch is short-
+     * circuited before this callback is reached, so it is not invoked
+     * for 408. It is still invoked for 481.
+     *
+     * Threading: invoked synchronously while the dialog group lock is
+     * held. Do not call any Call or Endpoint API from this callback
+     * that would acquire a higher-order lock; defer such work via a
+     * timer or by posting to your own queue.
+     *
+     * Default implementation does nothing (call is terminated as before).
+     *
+     * @param prm       Callback parameter.
+     */
+    virtual void onCallTsxTerminateSession(OnCallTsxTerminateSessionParam &prm)
+    { PJ_UNUSED_ARG(prm); }
     
     /**
      * Notify application when media state in the call has changed.
@@ -1925,8 +2108,8 @@ public:
      * (as opposed to onStreamCreated(), which is called *after* the session
      * has been created). The application may change
      * some stream info parameter values, i.e: jbInit, jbMinPre, jbMaxPre,
-     * jbMax, useKa, rtcpSdesByeDisabled, jbDiscardAlgo (audio),
-     * vidCodecParam.encFmt (video).
+     * jbMax, useKa, startCountKa, startIntervalKa, intervalKa,
+     * rtcpSdesByeDisabled, jbDiscardAlgo (audio), vidCodecParam.encFmt (video).
      *
      * @param prm       Callback parameter.
      */
@@ -1938,6 +2121,17 @@ public:
      * registered to the conference bridge. Application may return different
      * audio media port if it has added media processing port to the stream.
      * This media port then will be added to the conference bridge instead.
+     *
+     * \warning
+     * Same lifetime contract as the C-side on_stream_created2(): if the
+     * substituted port wraps the original audio stream port, the wrapper
+     * must pin the inner port via pj_grp_lock_add_ref() on its grp_lock
+     * at construction and release it from on_destroy(); otherwise
+     * pjmedia_stream_destroy() at call teardown may free it while the
+     * conference bridge still references the wrapper. The substituted
+     * port also needs its own pool released from on_destroy(); set
+     * #OnStreamCreatedParam::destroyPort to true so the destroy chain
+     * fires. See "Customizing the Audio Stream Port" in the docs guide.
      *
      * @param prm       Callback parameter.
      */
@@ -1967,6 +2161,15 @@ public:
      * @param prm       Callback parameter.
      */
     virtual void onDtmfEvent(OnDtmfEventParam &prm)
+    { PJ_UNUSED_ARG(prm); }
+
+    /**
+     * Notify application upon incoming text data from the text stream.
+     * Note that the received text can be empty.
+     *
+     * @param prm       Callback parameter.
+     */
+    virtual void onCallRxText(OnCallRxTextParam &prm)
     { PJ_UNUSED_ARG(prm); }
 
     /**
@@ -2248,11 +2451,10 @@ public:
 private:
     friend class Endpoint;
 
-    Account             &acc;
+    Account             *acc;
     pjsua_call_id        id;
     Token                userData;
     std::vector<Media *> medias;
-    pj_pool_t           *sdp_pool;
     Call                *child;     /* New outgoing call in call transfer.  */
 };
 

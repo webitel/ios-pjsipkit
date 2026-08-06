@@ -27,7 +27,7 @@
  */
 
 /* Canonical OS name */
-#define PJ_OS_NAME "arm64-apple-darwin_ios"
+#define PJ_OS_NAME "aarch64-apple-darwin_ios"
 
 /* Legacy macros */
 /* #undef PJ_WIN64 */
@@ -123,6 +123,9 @@
   typedef int socklen_t;
 #endif
 
+/* Select I/O queue backend. */
+#define PJ_IOQUEUE_IMP PJ_IOQUEUE_IMP_SELECT
+
 /**
  * If this macro is set, it tells select I/O Queue that select() needs to
  * be given correct value of nfds (i.e. largest fd + 1). This requires
@@ -134,9 +137,6 @@
  * Default: 0
  */
 #define PJ_SELECT_NEEDS_NFDS 0
-
-/* Was Linux epoll support enabled */
-/* #undef PJ_HAS_LINUX_EPOLL */
 
 /* Is errno a good way to retrieve OS errors?
  */
